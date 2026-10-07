@@ -13,13 +13,11 @@ import uvicorn
 from gtts import gTTS
 
 # ----------------- CONFIGURATION -----------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MEM0_API_KEY = os.getenv("MEM0_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KjbkKCJpNWnfUutNkhJbQ3O1GPfNnYiwfPYCh2WjGPbw")
+MEM0_API_KEY = os.getenv("MEM0_API_KEY", "m0-Q0av4q2w25kjwz6ktxLmer6QEV2n9WJ8r6vvt7YG")
 PORT = int(os.getenv("PORT", 8080))
-
-# Optional: Set your numeric Telegram ID in Render to restrict access to yourself
-ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")  # e.g., "123456789"
+ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID")
 # -------------------------------------------------
 
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -29,47 +27,102 @@ server = FastAPI()
 
 @server.get("/")
 def health_check():
-    return {"status": "ok", "message": "Bot is live"}
+    return {"status": "ok", "message": "Bot cashbook active"}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hey! I'm your persistent personal AI assistant.\n\n"
-        "• Send text -> I reply in text.\n"
-        "• Send voice note or video note -> I reply in voice.\n"
-        "• All tasks and context are stored across chats.\n\n"
-        "Commands:\n"
-        "/tasks - View pending memories and tasks\n"
-        "/forget - Clear saved memories"
+        "👋 Welcome! I'm your Personal Assistant & Real-Time Cashbook.\n\n"
+        "📸 **Cashbook:** Send any payment screenshot (UPI, GPay, Paytm, invoice, bill) and I'll extract and log the amount, payee, and date.\n"
+        "🎙️ **Voice/Video:** Send audio notes to log cash spent or ask questions.\n"
+        "📊 **Commands:**\n"
+        "/ledger - View recent logged transactions\n"
+        "/tasks - View pending tasks and general context"
     )
 
-async def view_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def view_ledger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
         return
 
     try:
-        search_res = mem_client.get_all(filters={"user_id": user_id})
-        memories = search_res.get("results", []) if isinstance(search_res, dict) else search_res
-        
-        if not memories:
-            await update.message.reply_text("No stored tasks or memories found.")
+        search_res = mem_client.search(query="payment transaction spent debit credit received ₹", filters={"user_id": user_id})
+        records = search_res.get("results", []) if isinstance(search_res, dict) else search_res
+
+        if not records:
+            await update.message.reply_text("No transactions logged yet.")
             return
 
-        formatted = "\n".join([f"• {m.get('memory', '')}" for m in memories if isinstance(m, dict) and "memory" in m])
-        await update.message.reply_text(f"Here is what I have remembered:\n\n{formatted}")
+        formatted = "\n\n".join([f"• {m.get('memory', '')}" for m in records if isinstance(m, dict) and "memory" in m])
+        await update.message.reply_text(f"📖 **Recent Transactions & Entries:**\n\n{formatted}")
     except Exception as e:
-        await update.message.reply_text(f"Could not retrieve tasks: {e}")
+        await update.message.reply_text(f"Could not fetch ledger: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     if ALLOWED_USER_ID and user_id != ALLOWED_USER_ID:
         return
 
-    is_audio_input = bool(update.message.voice or update.message.video_note)
+    tz = pytz.timezone("Asia/Kolkata")
+    now_str = datetime.now(tz).strftime("%A, %d %B %Y, %I:%M %p IST")
+
+    is_audio = bool(update.message.voice or update.message.video_note)
+    is_photo = bool(update.message.photo)
     user_text = ""
 
-    # 1. Handle Voice & Video Notes
-    if is_audio_input:
+    # 1. Handle Transaction Receipt Photo
+    if is_photo:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        try:
+            photo_file = await context.bot.get_file(update.message.photo[-1].file_id)
+            img_bytes = await photo_file.download_as_bytearray()
+            caption = update.message.caption or ""
+
+            prompt = (
+                f"You are an accountant managing a personal cashbook. Current date: {now_str}.\n"
+                f"Analyze this payment receipt/transaction screenshot carefully.\n"
+                f"User note/caption: '{caption}'.\n\n"
+                "Extract:\n"
+                "1. Transaction Type (Debit/Expense OR Credit/Received)\n"
+                "2. Amount (in INR ₹)\n"
+                "3. Payee / Beneficiary / Vendor name\n"
+                "4. Date/Time and Transaction ID / UTR (if visible)\n"
+                "5. Purpose/Category (e.g., Food, Fuel, Operations, Equipment, Raw Materials)\n\n"
+                "Output a neat transaction confirmation summary in 3-4 bullet points. "
+                "End with an explicit 'LOGGED_ENTRY:' line formatted like: "
+                "'LOGGED_ENTRY: [Date] Paid ₹Amount to Payee for Category (Txn: ID)'"
+            )
+
+            response = ai_client.models.generate_content(
+                model='gemini-3.5-flash-lite',
+                contents=[
+                    genai.types.Part.from_bytes(data=bytes(img_bytes), mime_type="image/jpeg"),
+                    prompt
+                ]
+            )
+            bot_reply = response.text
+
+            # Persist extracted payment directly into Mem0
+            try:
+                mem_client.add(
+                    messages=[
+                        {"role": "user", "content": f"[Transaction Screenshot uploaded at {now_str}]. Note: {caption}"},
+                        {"role": "assistant", "content": bot_reply}
+                    ],
+                    user_id=user_id
+                )
+            except Exception as e:
+                print(f"Mem0 photo save error: {e}")
+
+            await update.message.reply_text(bot_reply)
+            return
+
+        except Exception as e:
+            print(f"Photo processing error: {e}")
+            await update.message.reply_text("Could not process transaction screenshot. Please try again.")
+            return
+
+    # 2. Handle Voice / Video
+    elif is_audio:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.RECORD_VOICE)
         try:
             file_obj = update.message.voice or update.message.video_note
@@ -90,6 +143,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Could not process audio. Please send text or try again.")
             return
 
+    # 3. Handle Text
     elif update.message.text:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
         user_text = update.message.text.strip()
@@ -97,7 +151,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
 
-    # 2. Retrieve persistent memories
+    # 4. Search context / previous records
     memory_context = ""
     try:
         search_res = mem_client.search(query=user_text, filters={"user_id": user_id})
@@ -109,18 +163,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Mem0 search error: {e}")
 
-    # 3. Time awareness
-    tz = pytz.timezone("Asia/Kolkata")
-    now_str = datetime.now(tz).strftime("%A, %d %B %Y, %I:%M %p IST")
-
     system_instruction = (
-        "You are an executive personal AI assistant on Telegram.\n"
-        f"Current time: {now_str}\n"
-        f"Relevant remembered context about the user:\n{memory_context}\n\n"
-        "Provide direct, concise, and helpful responses without robotic preamble."
+        f"You are a personal assistant and live cashbook manager. Current time: {now_str}.\n"
+        f"Context and past entries:\n{memory_context}\n\n"
+        "If the user is asking about their spending, summarize total spent and breakdown based on context. "
+        "If they are noting cash spent manually (e.g. 'Paid 500 for diesel'), confirm the debit clearly."
     )
 
-    # 4. Generate response with fallback
     candidate_models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.1-pro']
     bot_reply = None
 
@@ -136,13 +185,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_reply = response.text
             break
         except Exception as err:
-            print(f"Model {model_name} error: {err}")
+            print(f"Model error {model_name}: {err}")
             continue
 
     if not bot_reply:
-        bot_reply = "I'm having trouble connecting to the language model right now. Please try again shortly."
+        bot_reply = "Service is temporarily busy. Please try again shortly."
 
-    # 5. Persist interaction
+    # Save conversation
     try:
         mem_client.add(
             messages=[
@@ -154,21 +203,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Mem0 add error: {e}")
 
-    # 6. Mirror input medium in reply
-    if is_audio_input:
+    # Reply matching audio format if input was voice/video
+    if is_audio:
         try:
             tts = gTTS(text=bot_reply, lang="en")
             voice_buffer = io.BytesIO()
             tts.write_to_fp(voice_buffer)
             voice_buffer.seek(0)
-
-            await context.bot.send_voice(
-                chat_id=update.effective_chat.id,
-                voice=voice_buffer,
-                caption=bot_reply
-            )
+            await context.bot.send_voice(chat_id=update.effective_chat.id, voice=voice_buffer, caption=bot_reply)
         except Exception as e:
-            print(f"TTS error: {e}")
             await update.message.reply_text(bot_reply)
     else:
         await update.message.reply_text(bot_reply)
@@ -176,8 +219,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_bot():
     bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
-    bot_app.add_handler(CommandHandler("tasks", view_tasks))
-    bot_app.add_handler(MessageHandler(filters.TEXT | filters.VOICE | filters.VIDEO_NOTE, handle_message))
+    bot_app.add_handler(CommandHandler("ledger", view_ledger))
+    bot_app.add_handler(MessageHandler(filters.TEXT | filters.VOICE | filters.VIDEO_NOTE | filters.PHOTO, handle_message))
 
     await bot_app.initialize()
     await bot_app.start()
