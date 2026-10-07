@@ -1,0 +1,6 @@
+python-telegram-bot==21.1.1
+google-genai
+mem0ai
+requests
+fastapi
+uvicorn
