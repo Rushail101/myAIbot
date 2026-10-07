@@ -11,7 +11,7 @@ from gtts import gTTS
 
 # ----------------- CONFIGURATION -----------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KjbkKCJpNWnfUutNkhJbQ3O1GPfNnYiwfPYCh2WjGPbw")[cite: 1]
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KjbkKCJpNWnfUutNkhJbQ3O1GPfNnYiwfPYCh2WjGPbw")
 MEM0_API_KEY = os.getenv("MEM0_API_KEY", "m0-Q0av4q2w25kjwz6ktxLmer6QEV2n9WJ8r6vvt7YG")
 PORT = int(os.getenv("PORT", 8080))
 # -------------------------------------------------
