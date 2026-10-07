@@ -4,3 +4,4 @@ mem0ai
 requests
 fastapi
 uvicorn
+gTTS
