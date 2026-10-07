@@ -78,7 +78,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             mime = "audio/ogg" if update.message.voice else "video/mp4"
             transcription = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.5-flash-lite',
                 contents=[
                     genai.types.Part.from_bytes(data=bytes(audio_bytes), mime_type=mime),
                     "Transcribe this audio verbatim. Output only the plain transcription, nothing else."
@@ -121,7 +121,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # 4. Generate response with fallback
-    candidate_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+    candidate_models = ['gemini-3.5-flash-lite', 'gemini-3.8-flash', 'gemini-3.1-pro']
     bot_reply = None
 
     for model_name in candidate_models:
