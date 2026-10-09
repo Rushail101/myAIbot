@@ -1,7 +1,13 @@
-python-telegram-bot==21.1.1
-google-genai
-mem0ai
-requests
+supabase
+python-telegram-bot
 fastapi
 uvicorn
+openai
+google-genai
+google-auth
+mem0ai
+qdrant-client
 gTTS
+requests
+pydantic
+sqlalchemy
