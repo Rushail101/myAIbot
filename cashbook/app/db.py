@@ -24,6 +24,9 @@ def _c() -> httpx.AsyncClient:
 
 async def insert(row: dict) -> dict:
     r = await _c().post(f"/{TABLE}", json=row, headers={"Prefer": "return=representation"})
+    if r.status_code == 400 and "entry_time" in row:  # column not migrated yet -> save without the time
+        row = {k: v for k, v in row.items() if k != "entry_time"}
+        r = await _c().post(f"/{TABLE}", json=row, headers={"Prefer": "return=representation"})
     r.raise_for_status()
     return r.json()[0]
 
