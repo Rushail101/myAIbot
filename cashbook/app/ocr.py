@@ -28,6 +28,17 @@ DATE_PATTERNS = [
     re.compile(r"\b[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{4}\b"),   # Oct 10, 2026
     re.compile(r"\b\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}\b"),      # 10/10/2026
 ]
+MONTH_WORD = re.compile(
+    r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b",
+    re.I,
+)
+_M = MONTH_WORD.pattern[3:-3]  # the alternation without the \b( ) wrapper
+DATE_NO_YEAR = [
+    re.compile(rf"\b(?:{_M})\.?[ \t]+\d{{1,2}}(?!\d)", re.I),    # October 10
+    re.compile(rf"\b\d{{1,2}}[ \t]+(?:{_M})\b", re.I),           # 10 Oct
+]
+TIME_12H = re.compile(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp][Mm])\b")
+TIME_24H = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?\b")
 REF_12 = re.compile(r"\b(\d{12})\b")
 REF_LABEL = re.compile(
     r"(?:UPI\s*(?:Ref(?:erence)?|transaction)?\s*(?:No|ID|Id)?\.?|Transaction\s*ID|UTR|Ref(?:erence)?\s*(?:No|ID)?\.?)"
@@ -90,8 +101,12 @@ def parse_party(text: str, direction: str) -> Optional[str]:
     if not m:
         return None
     name = re.split(r"[\n|]", m.group(1))[0].strip(" :-")
+    # Long business names wrap onto a second ALL-CAPS line (e.g. "...GENERAL" / "STORE")
+    nxt = text[m.end():].lstrip("\n").split("\n", 1)[0].strip()
+    if name.isupper() and nxt.isupper() and len(nxt) <= 30 and not re.search(r"[\d:@]", nxt):
+        name += " " + nxt
     name = re.sub(r"\s{2,}", " ", name)
-    return name[:60] or None
+    return name[:80] or None
 
 
 def parse_date(text: str) -> Optional[date]:
@@ -104,6 +119,34 @@ def parse_date(text: str) -> Optional[date]:
                 continue
             if today - timedelta(days=730) <= d <= today + timedelta(days=1):
                 return d
+    # No year printed (e.g. Super.money: "October 10 at 7:08 PM") -> assume this year,
+    # or last year if that would land in the future.
+    for pat in DATE_NO_YEAR:
+        m = pat.search(text)
+        if not m:
+            continue
+        try:
+            d = dateparser.parse(m.group(0), default=datetime(today.year, 1, 1)).date()
+        except (ValueError, OverflowError):
+            continue
+        if d > today + timedelta(days=1):
+            d = d.replace(year=d.year - 1)
+        return d
+    return None
+
+
+def parse_time(text: str) -> Optional[str]:
+    """Returns 24h 'HH:MM' or None."""
+    m = TIME_12H.search(text)
+    if m:
+        h, mi, ap = int(m.group(1)), int(m.group(2)), m.group(3).upper()
+        if 1 <= h <= 12:
+            return f"{h % 12 + (12 if ap == 'PM' else 0):02d}:{mi:02d}"
+    for line in text.splitlines():  # 24h clock, only on a line that also looks like a date
+        if MONTH_WORD.search(line) or re.search(r"\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}", line):
+            m = TIME_24H.search(line)
+            if m:
+                return f"{int(m.group(1)):02d}:{m.group(2)}"
     return None
 
 
@@ -122,6 +165,7 @@ def parse_text(text: str) -> dict:
         "direction": direction,
         "party": parse_party(text, direction),
         "entry_date": parse_date(text),
+        "entry_time": parse_time(text),
         "upi_ref": parse_ref(text),
     }
 
