@@ -1,5 +1,0 @@
-python-telegram-bot==21.10
-pytesseract==0.3.13
-Pillow==11.1.0
-python-dotenv==1.0.1
-supabase==2.15.0
