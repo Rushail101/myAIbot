@@ -1,20 +1,9 @@
-
 services:
-  - type: web
-    name: nova-geo-bot
-    runtime: docker
-    plan: starter
-    dockerfilePath: ./Dockerfile
-    healthCheckPath: /health
-    autoDeploy: true
+  - type: worker
+    name: nova-geo-transaction-system
+    runtime: python
+    buildCommand: pip install -r bot/requirements.txt
+    startCommand: python bot/bot.py
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_ALLOWED_USER_IDS
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_SECRET_KEY
-        sync: false
-      - key: TELEGRAM_WEBHOOK_SECRET
-        generateValue: true
+      - key: PYTHON_VERSION
+        value: 3.12.10
