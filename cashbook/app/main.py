@@ -41,6 +41,7 @@ def auth(x_api_key: Optional[str] = Header(default=None)):
 
 class EntryIn(BaseModel):
     entry_date: str
+    entry_time: Optional[str] = None
     amount: float
     direction: str = "out"
     mode: str = "cash"
@@ -53,6 +54,7 @@ class EntryIn(BaseModel):
 
 class EntryPatch(BaseModel):
     entry_date: Optional[str] = None
+    entry_time: Optional[str] = None
     amount: Optional[float] = None
     direction: Optional[str] = None
     mode: Optional[str] = None
