@@ -84,7 +84,8 @@ def arrow(direction: str) -> str:
 
 
 def describe(e: dict) -> str:
-    bits = [f"{inr(e.get('amount'))} {arrow(e['direction'])}", e["entry_date"], e["mode"].upper()]
+    when = e["entry_date"] + (f" {e['entry_time'][:5]}" if e.get("entry_time") else "")
+    bits = [f"{inr(e.get('amount'))} {arrow(e['direction'])}", when, e["mode"].upper()]
     if e.get("party"):
         bits.append(e["party"])
     line = " · ".join(bits)
@@ -144,6 +145,7 @@ async def _log_cash(update: Update, ctx: ContextTypes.DEFAULT_TYPE, direction: s
     e = await db.insert(
         {
             "entry_date": today_ist().isoformat(),
+            "entry_time": datetime.now(IST).strftime("%H:%M"),
             "amount": amount,
             "direction": direction,
             "mode": "cash",
@@ -252,6 +254,7 @@ async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     e = await db.insert(
         {
             "entry_date": (info.get("entry_date") or today_ist()).isoformat(),
+            "entry_time": info.get("entry_time"),
             "amount": info.get("amount"),
             "direction": info.get("direction") or "out",
             "mode": "upi",
