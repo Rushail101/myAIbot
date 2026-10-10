@@ -237,18 +237,18 @@ async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tg_file = await msg.document.get_file()
     else:
         return
+    ack = await msg.reply_text("📸 Got it, reading…")  # instant feedback while OCR runs
     data = bytes(await tg_file.download_as_bytearray())
     try:
         info = await asyncio.to_thread(ocr.extract, data)
-    except Exception as exc:  # OCR failure shouldn't lose the transaction
+    except Exception:  # OCR failure shouldn't lose the transaction
         info = {"amount": None, "direction": "out", "party": None, "entry_date": None, "upi_ref": None}
-        await msg.reply_text(f"⚠️ Couldn't read that image ({exc.__class__.__name__}). Type the amount instead.")
 
     ref = info.get("upi_ref")
     if ref:
         dup = await db.get_by_ref(ref)
         if dup:
-            await msg.reply_text("⚠️ Looks like a duplicate — already logged:\n" + describe(dup))
+            await ack.edit_text("⚠️ Looks like a duplicate — already logged:\n" + describe(dup))
             return
 
     e = await db.insert(
@@ -261,17 +261,17 @@ async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "party": info.get("party"),
             "upi_ref": ref,
             "status": "pending",
+            "tg_msg_id": ack.message_id,  # the message we edit below, so replying to it labels this entry
         }
     )
     if e.get("amount") is None:
-        sent = await msg.reply_text(
+        await ack.edit_text(
             "Couldn't read the amount. Reply to this message with the amount (e.g. 1500).",
             reply_markup=entry_keyboard(e),
         )
         ctx.user_data["fix"] = e["id"]
     else:
-        sent = await msg.reply_text(describe(e) + "\nWhat was it for?", reply_markup=entry_keyboard(e))
-    await db.update(e["id"], {"tg_msg_id": sent.message_id})
+        await ack.edit_text(describe(e) + "\nWhat was it for?", reply_markup=entry_keyboard(e))
 
 
 # ---------- free text ----------
@@ -357,7 +357,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def build_application() -> Application:
-    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).concurrent_updates(True).build()
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("cash", cmd_cash))
     app.add_handler(CommandHandler("cashin", cmd_cashin))
