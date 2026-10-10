@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nova Geo Cashbook</title>
+<style>
+  :root{
+    --bg:#f6f5f1; --card:#fff; --ink:#1d1d1b; --mute:#77756e; --line:#e4e1d8;
+    --in:#17803d; --out:#b42318; --accent:#2b4c7e; --warn:#fff4d6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#141412; --card:#1d1d1a; --ink:#ecebe6; --mute:#9a978d; --line:#2e2d29;
+      --in:#4cc97a; --out:#ff7a6b; --accent:#8fb2e8; --warn:#3a3118; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1100px;margin:0 auto;padding:16px}
+  h1{font-size:20px;margin:4px 0 14px;letter-spacing:.2px}
+  h1 small{color:var(--mute);font-weight:400;font-size:13px;margin-left:8px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .stat b{display:block;font-size:19px;font-variant-numeric:tabular-nums}
+  .stat span{color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.6px}
+  .in{color:var(--in)} .out{color:var(--out)}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center}
+  input,select,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+  button{cursor:pointer} button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  button.link{border:none;background:none;color:var(--accent);padding:2px 6px}
+  button.danger{color:var(--out)}
+  .grow{flex:1;min-width:140px}
+  .tablewrap{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow-x:auto}
+  table{border-collapse:collapse;width:100%;min-width:760px}
+  th,td{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--mute);position:sticky;top:0;background:var(--card)}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  tr.pending td{background:var(--warn)}
+  tr:last-child td{border-bottom:none}
+  td input,td select{width:100%;padding:5px 7px}
+  .tag{font-size:11px;padding:1px 7px;border:1px solid var(--line);border-radius:99px;color:var(--mute)}
+  .empty{padding:30px;text-align:center;color:var(--mute)}
+  dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);padding:18px;width:min(420px,92vw)}
+  dialog::backdrop{background:rgba(0,0,0,.4)}
+  dialog label{display:block;margin:8px 0 3px;font-size:12px;color:var(--mute)}
+  dialog input,dialog select{width:100%}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  @media(max-width:640px){.stats{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Nova Geo Cashbook <small id="count"></small></h1>
+
+  <div class="stats">
+    <div class="stat"><span>Money in</span><b class="in" id="sIn">–</b></div>
+    <div class="stat"><span>Money out</span><b class="out" id="sOut">–</b></div>
+    <div class="stat"><span>Net</span><b id="sNet">–</b></div>
+    <div class="stat"><span>Pending labels</span><b id="sPend">–</b></div>
+  </div>
+
+  <div class="bar">
+    <input type="date" id="fFrom" title="From">
+    <input type="date" id="fTo" title="To">
+    <select id="fMode"><option value="">UPI + Cash</option><option value="upi">UPI</option><option value="cash">Cash</option></select>
+    <select id="fDir"><option value="">In + Out</option><option value="in">In</option><option value="out">Out</option></select>
+    <select id="fStatus"><option value="">All</option><option value="pending">Pending only</option><option value="done">Labelled</option></select>
+    <input class="grow" id="fQ" type="search" placeholder="Search purpose, party, notes…">
+    <button id="bMonth">This month</button>
+    <button id="bAdd" class="primary">+ Add entry</button>
+    <button id="bCsv">Export CSV</button>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Date</th><th>Mode</th><th>Party</th><th>Purpose</th><th>Category</th><th style="text-align:right">Amount</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>No entries match these filters.</div>
+  </div>
+</div>
+
+<dialog id="dlg">
+  <form method="dialog" id="addForm">
+    <h3 style="margin:0 0 6px">Add entry</h3>
+    <div class="row2">
+      <div><label>Date</label><input type="date" name="entry_date" required></div>
+      <div><label>Amount (₹)</label><input type="number" name="amount" step="0.01" min="0" required></div>
+    </div>
+    <div class="row2">
+      <div><label>Direction</label><select name="direction"><option value="out">Paid out</option><option value="in">Received</option></select></div>
+      <div><label>Mode</label><select name="mode"><option value="cash">Cash</option><option value="upi">UPI</option></select></div>
+    </div>
+    <label>Party</label><input name="party">
+    <label>Purpose</label><input name="purpose">
+    <label>Category</label><input name="category" list="cats">
+    <datalist id="cats"></datalist>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button type="button" id="cancelAdd">Cancel</button>
+      <button class="primary" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const qs = new URLSearchParams(location.search);
+if (qs.get('key')) { try { localStorage.setItem('cbkey', qs.get('key')); } catch(e){} history.replaceState(null,'',location.pathname); }
+let KEY = ''; try { KEY = localStorage.getItem('cbkey') || ''; } catch(e){}
+const CATS = ['Raw material','Labour','Diesel/Fuel','Electricity','Transport','Repairs','Food/Tea','Partner','Other'];
+$('#cats').innerHTML = CATS.map(c => `<option value="${c}">`).join('');
+
+let data = [], editing = null;
+
+const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', {maximumFractionDigits: 2});
+const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtDate = d => new Date(d + 'T00:00:00').toLocaleDateString('en-IN', {day:'2-digit', month:'short', year:'2-digit'});
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {...opts, headers: {'Content-Type':'application/json', 'x-api-key': KEY, ...(opts.headers||{})}});
+  if (r.status === 401) {
+    KEY = prompt('Enter dashboard key') || '';
+    try { localStorage.setItem('cbkey', KEY); } catch(e){}
+    return api(path, opts);
+  }
+  if (!r.ok) { alert('Error: ' + (await r.text())); throw new Error(r.status); }
+  return r.json();
+}
+
+function filters() {
+  const p = new URLSearchParams();
+  if ($('#fFrom').value) p.set('from', $('#fFrom').value);
+  if ($('#fTo').value) p.set('to', $('#fTo').value);
+  if ($('#fMode').value) p.set('mode', $('#fMode').value);
+  if ($('#fDir').value) p.set('direction', $('#fDir').value);
+  if ($('#fStatus').value) p.set('status', $('#fStatus').value);
+  if ($('#fQ').value.trim()) p.set('q', $('#fQ').value.trim());
+  return p;
+}
+
+async function load() {
+  data = await api('/api/entries?' + filters());
+  render();
+}
+
+function render() {
+  let inn = 0, out = 0, pend = 0;
+  data.forEach(e => {
+    const a = Number(e.amount || 0);
+    if (e.direction === 'in') inn += a; else out += a;
+    if (e.status === 'pending') pend++;
+  });
+  $('#sIn').textContent = inr(inn); $('#sOut').textContent = inr(out);
+  const net = inn - out; $('#sNet').textContent = inr(net); $('#sNet').className = net >= 0 ? 'in' : 'out';
+  $('#sPend').textContent = pend; $('#count').textContent = data.length + ' entries';
+  $('#empty').hidden = data.length > 0;
+  $('#rows').innerHTML = data.map(e => e.id === editing ? editRow(e) : viewRow(e)).join('');
+}
+
+function viewRow(e) {
+  const cls = e.direction === 'in' ? 'in' : 'out';
+  return `<tr class="${e.status === 'pending' ? 'pending' : ''}">
+    <td>${fmtDate(e.entry_date)}</td>
+    <td><span class="tag">${e.mode.toUpperCase()}</span></td>
+    <td>${esc(e.party)}</td>
+    <td>${e.purpose ? esc(e.purpose) : '<i style="color:var(--mute)">needs a purpose</i>'}</td>
+    <td>${esc(e.category)}</td>
+    <td class="num ${cls}">${e.direction === 'in' ? '+' : '−'}${inr(e.amount)}</td>
+    <td class="num"><button class="link" onclick="startEdit(${e.id})">Edit</button><button class="link danger" onclick="del(${e.id})">Delete</button></td>
+  </tr>`;
+}
+
+function editRow(e) {
+  return `<tr>
+    <td><input type="date" id="eDate" value="${e.entry_date}"></td>
+    <td><select id="eMode"><option value="upi" ${e.mode==='upi'?'selected':''}>UPI</option><option value="cash" ${e.mode==='cash'?'selected':''}>Cash</option></select></td>
+    <td><input id="eParty" value="${esc(e.party)}"></td>
+    <td><input id="ePurpose" value="${esc(e.purpose)}"></td>
+    <td><input id="eCat" list="cats" value="${esc(e.category)}"></td>
+    <td class="num"><select id="eDir" style="width:auto"><option value="out" ${e.direction==='out'?'selected':''}>Out</option><option value="in" ${e.direction==='in'?'selected':''}>In</option></select>
+      <input id="eAmt" type="number" step="0.01" value="${e.amount ?? ''}" style="width:100px"></td>
+    <td class="num"><button class="link" onclick="saveEdit(${e.id})">Save</button><button class="link" onclick="editing=null;render()">Cancel</button></td>
+  </tr>`;
+}
+
+window.startEdit = id => { editing = id; render(); };
+window.saveEdit = async id => {
+  await api('/api/entries/' + id, {method:'PATCH', body: JSON.stringify({
+    entry_date: $('#eDate').value, mode: $('#eMode').value, party: $('#eParty').value || null,
+    purpose: $('#ePurpose').value || null, category: $('#eCat').value || null,
+    direction: $('#eDir').value, amount: Number($('#eAmt').value),
+  })});
+  editing = null; load();
+};
+window.del = async id => { if (confirm('Delete this entry?')) { await api('/api/entries/' + id, {method:'DELETE'}); load(); } };
+
+$('#bAdd').onclick = () => { $('#addForm').reset(); $('#addForm').entry_date.value = new Date().toLocaleDateString('en-CA'); $('#dlg').showModal(); };
+$('#cancelAdd').onclick = () => $('#dlg').close();
+$('#addForm').onsubmit = async ev => {
+  const f = new FormData(ev.target);
+  const body = Object.fromEntries([...f.entries()].map(([k, v]) => [k, v === '' ? null : v]));
+  body.amount = Number(body.amount);
+  await api('/api/entries', {method:'POST', body: JSON.stringify(body)});
+  load();
+};
+$('#bMonth').onclick = () => {
+  const d = new Date(); const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0');
+  $('#fFrom').value = `${y}-${m}-01`; $('#fTo').value = ''; load();
+};
+$('#bCsv').onclick = () => {
+  const head = ['Date','Mode','Direction','Amount','Party','Purpose','Category','UPI Ref','Notes','Status'];
+  const q = v => '"' + (v ?? '').toString().replace(/"/g, '""') + '"';
+  const lines = [head.join(',')].concat(data.map(e => [e.entry_date, e.mode, e.direction, e.amount, e.party, e.purpose, e.category, e.upi_ref, e.notes, e.status].map(q).join(',')));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\n')], {type:'text/csv'}));
+  a.download = 'nova-geo-cashbook.csv'; a.click();
+};
+['fFrom','fTo','fMode','fDir','fStatus'].forEach(id => $('#' + id).onchange = load);
+let t; $('#fQ').oninput = () => { clearTimeout(t); t = setTimeout(load, 300); };
+
+load();
+</script>
+</body>
+</html>
