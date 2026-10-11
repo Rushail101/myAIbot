@@ -66,6 +66,45 @@ def parse_amount_text(s: str):
     return v if v > 0 else None
 
 
+_MON = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+_MONTHS = {m: i + 1 for i, m in enumerate(_MON.split("|"))}
+_DATE_RES = [
+    re.compile(r"\b(?:on\s+)?(yesterday|today)\b", re.I),
+    re.compile(r"\b(?:on\s+)?(\d{1,2})[/\-.](\d{1,2})(?:[/\-.](\d{2,4}))?(?!\d)", re.I),   # 8/10, 08-10-2026
+    re.compile(rf"\b(?:on\s+)?(\d{{1,2}})(?:st|nd|rd|th)?\s*({_MON})[a-z]*\.?(?:\s+(\d{{4}}))?\b", re.I),  # 8 oct
+    re.compile(rf"\b(?:on\s+)?({_MON})[a-z]*\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I),  # oct 8
+]
+
+
+def extract_date(text: str):
+    """Pulls a date out of free text. Returns (date or None, text with the date removed)."""
+    today = today_ist()
+    for i, rx in enumerate(_DATE_RES):
+        m = rx.search(text)
+        if not m:
+            continue
+        try:
+            if i == 0:
+                d = today - timedelta(days=1) if m.group(1).lower() == "yesterday" else today
+            else:
+                if i == 1:
+                    day, mon, yr = int(m.group(1)), int(m.group(2)), m.group(3)
+                elif i == 2:
+                    day, mon, yr = int(m.group(1)), _MONTHS[m.group(2).lower()], m.group(3)
+                else:
+                    day, mon, yr = int(m.group(2)), _MONTHS[m.group(1).lower()], None
+                year = int(yr) + (2000 if yr and len(yr) == 2 else 0) if yr else today.year
+                d = today.replace(year=year, month=mon, day=day)
+                if not yr and d > today:  # "28 dec" typed in January means last year
+                    d = d.replace(year=d.year - 1)
+        except ValueError:
+            continue
+        if d > today:
+            continue
+        return d, (text[: m.start()] + " " + text[m.end():]).strip()
+    return None, text
+
+
 def owner_only(fn):
     @wraps(fn)
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -136,16 +175,17 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _log_cash(update: Update, ctx: ContextTypes.DEFAULT_TYPE, direction: str):
     text = " ".join(ctx.args or [])
+    when, text = extract_date(text)  # "yesterday", "8 oct", "8/10" anywhere in the message
     amount = parse_amount_text(text)
     if amount is None:
         cmd = "cashin" if direction == "in" else "cash"
-        await update.message.reply_text(f"Usage: /{cmd} 500 what it was for")
+        await update.message.reply_text(f"Usage: /{cmd} 500 what it was for  (add a date like 'yesterday' or '8 oct' if needed)")
         return
     purpose = re.sub(r"^\s*\d[\d,]*(?:\.\d+)?\s*", "", text).strip()
     e = await db.insert(
         {
-            "entry_date": today_ist().isoformat(),
-            "entry_time": datetime.now(IST).strftime("%H:%M"),
+            "entry_date": (when or today_ist()).isoformat(),
+            "entry_time": None if when and when != today_ist() else datetime.now(IST).strftime("%H:%M"),
             "amount": amount,
             "direction": direction,
             "mode": "cash",
