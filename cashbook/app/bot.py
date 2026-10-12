@@ -311,7 +311,8 @@ async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         ctx.user_data["fix"] = e["id"]
     else:
-        await ack.edit_text(describe(e) + "\nWhat was it for?", reply_markup=entry_keyboard(e))
+        warn = "" if info.get("amount_sure", True) else "\n⚠️ Please double-check the amount (tap ✏️ Amount to fix)"
+        await ack.edit_text(describe(e) + warn + "\nWhat was it for?", reply_markup=entry_keyboard(e))
 
 
 # ---------- free text ----------
