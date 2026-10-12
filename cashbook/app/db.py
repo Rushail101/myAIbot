@@ -75,8 +75,14 @@ async def list_entries(
     q: Optional[str] = None,
     limit: int = 1000,
     order: str = "entry_date.desc,id.desc",
+    offset: int = 0,
+    select: Optional[str] = None,
 ) -> list[dict]:
     params: list[tuple[str, Any]] = [("order", order), ("limit", limit)]
+    if offset:
+        params.append(("offset", offset))
+    if select:
+        params.append(("select", select))
     if date_from:
         params.append(("entry_date", f"gte.{date_from}"))
     if date_to:
@@ -93,6 +99,18 @@ async def list_entries(
     r = await _c().get(f"/{TABLE}", params=params)
     r.raise_for_status()
     return r.json()
+
+
+async def list_all(**filters) -> list[dict]:
+    """Every matching row. Supabase returns at most 1000 rows per request, so page through them."""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = await list_entries(limit=1000, offset=offset, **filters)
+        rows += page
+        if len(page) < 1000:
+            return rows
+        offset += 1000
 
 
 async def last_created() -> Optional[dict]:
