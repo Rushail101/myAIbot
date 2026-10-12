@@ -4,14 +4,16 @@ Flow
   * Send a UPI screenshot  -> bot reads amount/payee/date, asks what it was for.
     Tap a category button, or just reply to that message with free text.
   * /cash 500 diesel       -> cash paid out.     /cashin 2000 partner top-up -> cash received.
-  * /today /pending /summary /undo
+  * /today /pending /summary /total /undo
 """
 import asyncio
+import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 
+import pytesseract
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -24,6 +26,8 @@ from telegram.ext import (
 
 from . import db, ocr
 
+log = logging.getLogger("cashbook")
+OCR_TIMEOUT = float(os.environ.get("OCR_TIMEOUT", "90"))  # seconds before giving up on reading a screenshot
 OWNER_ID = int(os.environ.get("TELEGRAM_OWNER_ID", "0"))
 IST = timezone(timedelta(hours=5, minutes=30))
 CATEGORIES = [
@@ -167,7 +171,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• /today — today's entries\n"
         "• /pending — entries still missing a purpose\n"
         "• /summary — this month's totals\n"
-        "• /undo — delete the last entry\n\n"
+        "• /total — all-time totals (or /total sep for one month)\n"
+        "• /undo — delete the last entry\n"
+        "• /status — check that the bot, reader and database are working\n\n"
         "Tip: send many screenshots in a row and name them later — each one is tracked separately. "
         "Reply to a specific screenshot message to label that one."
     )
@@ -243,7 +249,7 @@ async def cmd_pending(update, ctx):
 @owner_only
 async def cmd_summary(update, ctx):
     first = today_ist().replace(day=1).isoformat()
-    rows = await db.list_entries(date_from=first, limit=5000)
+    rows = await db.list_all(date_from=first, select="amount,direction,category")
     out = sum(float(r["amount"] or 0) for r in rows if r["direction"] == "out")
     inn = sum(float(r["amount"] or 0) for r in rows if r["direction"] == "in")
     by_cat: dict[str, float] = {}
@@ -254,6 +260,49 @@ async def cmd_summary(update, ctx):
     top = "\n".join(f"  {k}: {inr(v)}" for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1])[:8])
     await update.message.reply_text(
         f"This month ({len(rows)} entries)\nIn {inr(inn)} · Out {inr(out)} · Net {inr(inn - out)}\n\nSpend by category:\n{top or '  —'}"
+    )
+
+
+@owner_only
+async def cmd_total(update, ctx):
+    """/total = everything ever.  /total sep  or  /total sep 2025 = one month."""
+    arg = " ".join(ctx.args or []).strip().lower()
+    date_from = date_to = None
+    label = "All time"
+    if arg:
+        m = re.match(rf"^({_MON})[a-z]*\.?(?:\s+(\d{{4}}))?$", arg)
+        if not m:
+            await update.message.reply_text("Usage: /total for everything, or /total sep (a month), or /total sep 2025")
+            return
+        mon, today = _MONTHS[m.group(1)], today_ist()
+        year = int(m.group(2)) if m.group(2) else (today.year if mon <= today.month else today.year - 1)
+        first = date(year, mon, 1)
+        last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        date_from, date_to, label = first.isoformat(), last.isoformat(), first.strftime("%B %Y")
+
+    rows = await db.list_all(date_from=date_from, date_to=date_to, select="amount,direction,mode,category,status")
+    if not rows:
+        await update.message.reply_text(f"{label}: no entries.")
+        return
+
+    def tot(direction, mode=None):
+        return sum(float(r["amount"] or 0) for r in rows if r["direction"] == direction and (mode is None or r["mode"] == mode))
+
+    inn, out = tot("in"), tot("out")
+    by_cat: dict[str, float] = {}
+    for r in rows:
+        if r["direction"] == "out":
+            k = r.get("category") or "Uncategorised"
+            by_cat[k] = by_cat.get(k, 0) + float(r["amount"] or 0)
+    cats = "\n".join(f"  {k}: {inr(v)}" for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1])[:10])
+    pending = sum(1 for r in rows if r["status"] == "pending")
+    await update.message.reply_text(
+        f"📊 {label} ({len(rows)} entries)\n"
+        f"In {inr(inn)} · Out {inr(out)} · Net {inr(inn - out)}\n\n"
+        f"UPI:  in {inr(tot('in', 'upi'))} · out {inr(tot('out', 'upi'))}\n"
+        f"Cash: in {inr(tot('in', 'cash'))} · out {inr(tot('out', 'cash'))} · net {inr(tot('in', 'cash') - tot('out', 'cash'))}\n\n"
+        f"Spend by category:\n{cats or '  —'}"
+        + (f"\n\n⏳ {pending} entr{'y' if pending == 1 else 'ies'} still need a purpose" if pending else "")
     )
 
 
@@ -278,41 +327,72 @@ async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         return
     ack = await msg.reply_text("📸 Got it, reading…")  # instant feedback while OCR runs
-    data = bytes(await tg_file.download_as_bytearray())
     try:
-        info = await asyncio.to_thread(ocr.extract, data)
-    except Exception:  # OCR failure shouldn't lose the transaction
-        info = {"amount": None, "direction": "out", "party": None, "entry_date": None, "upi_ref": None}
+        data = bytes(await tg_file.download_as_bytearray())
+        try:
+            info = await asyncio.wait_for(asyncio.to_thread(ocr.extract, data), timeout=OCR_TIMEOUT)
+        except Exception as exc:  # OCR failure/timeout shouldn't lose the transaction
+            log.warning("OCR failed or timed out: %r", exc)
+            info = {"amount": None, "direction": "out", "party": None, "entry_date": None, "upi_ref": None}
 
-    ref = info.get("upi_ref")
-    if ref:
-        dup = await db.get_by_ref(ref)
-        if dup:
-            await ack.edit_text("⚠️ Looks like a duplicate — already logged:\n" + describe(dup))
-            return
+        ref = info.get("upi_ref")
+        if ref:
+            dup = await db.get_by_ref(ref)
+            if dup:
+                await ack.edit_text("⚠️ Looks like a duplicate — already logged:\n" + describe(dup))
+                return
 
-    e = await db.insert(
-        {
-            "entry_date": (info.get("entry_date") or today_ist()).isoformat(),
-            "entry_time": info.get("entry_time"),
-            "amount": info.get("amount"),
-            "direction": info.get("direction") or "out",
-            "mode": "upi",
-            "party": info.get("party"),
-            "upi_ref": ref,
-            "status": "pending",
-            "tg_msg_id": ack.message_id,  # the message we edit below, so replying to it labels this entry
-        }
-    )
-    if e.get("amount") is None:
-        await ack.edit_text(
-            "Couldn't read the amount. Reply to this message with the amount (e.g. 1500).",
-            reply_markup=entry_keyboard(e),
+        e = await db.insert(
+            {
+                "entry_date": (info.get("entry_date") or today_ist()).isoformat(),
+                "entry_time": info.get("entry_time"),
+                "amount": info.get("amount"),
+                "direction": info.get("direction") or "out",
+                "mode": "upi",
+                "party": info.get("party"),
+                "upi_ref": ref,
+                "status": "pending",
+                "tg_msg_id": ack.message_id,  # the message we edit below, so replying to it labels this entry
+            }
         )
-        ctx.user_data["fix"] = e["id"]
-    else:
-        warn = "" if info.get("amount_sure", True) else "\n⚠️ Please double-check the amount (tap ✏️ Amount to fix)"
-        await ack.edit_text(describe(e) + warn + "\nWhat was it for?", reply_markup=entry_keyboard(e))
+        if e.get("amount") is None:
+            await ack.edit_text(
+                "Couldn't read the amount. Reply to this message with the amount (e.g. 1500).",
+                reply_markup=entry_keyboard(e),
+            )
+            ctx.user_data["fix"] = e["id"]
+        else:
+            warn = "" if info.get("amount_sure", True) else "\n⚠️ Please double-check the amount (tap ✏️ Amount to fix)"
+            await ack.edit_text(describe(e) + warn + "\nWhat was it for?", reply_markup=entry_keyboard(e))
+    except Exception as exc:
+        log.exception("on_image failed")
+        try:  # never leave the message stuck on "reading…"
+            await ack.edit_text(
+                f"⚠️ Couldn't save that one ({exc.__class__.__name__}). Please send it again, "
+                "or check /status. If it was already saved you'll get a duplicate notice."
+            )
+        except Exception:
+            pass
+
+
+@owner_only
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    lines = ["✅ Bot is running"]
+    try:
+        ver = await asyncio.to_thread(pytesseract.get_tesseract_version)
+        lines.append(f"✅ Screenshot reader ready (Tesseract {ver})")
+    except Exception as exc:
+        lines.append(f"❌ Screenshot reader problem: {exc.__class__.__name__}")
+    try:
+        await db.list_entries(limit=1)
+        lines.append("✅ Database reachable")
+    except Exception as exc:
+        lines.append(f"❌ Database problem: {exc.__class__.__name__}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled error while handling an update", exc_info=ctx.error)
 
 
 # ---------- free text ----------
@@ -405,7 +485,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("pending", cmd_pending))
     app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("total", cmd_total))
     app.add_handler(CommandHandler("undo", cmd_undo))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_image))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
