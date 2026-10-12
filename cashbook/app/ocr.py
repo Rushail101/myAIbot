@@ -39,7 +39,9 @@ DATE_NO_YEAR = [
 ]
 TIME_12H = re.compile(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\s*([AaPp][Mm])\b")
 TIME_24H = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?\b")
-REF_12 = re.compile(r"\b(\d{12})\b")
+# 12 digits standing alone - not part of an id like "vyapar.175693365847@hdfcbank" or "name123456789012@ybl"
+REF_12 = re.compile(r"(?<![\w@.\-])(\d{12})(?![\w@])")
+REF_LABELLED_12 = re.compile(r"(?:reference|ref|utr|transaction)[^\n\d]{0,20}?(\d{12})(?!\d)", re.I)
 REF_LABEL = re.compile(
     r"(?:UPI\s*(?:Ref(?:erence)?|transaction)?\s*(?:No|ID|Id)?\.?|Transaction\s*ID|UTR|Ref(?:erence)?\s*(?:No|ID)?\.?)"
     r"\s*[:#]?\s*([A-Za-z0-9]{10,})",
@@ -151,6 +153,9 @@ def parse_time(text: str) -> Optional[str]:
 
 
 def parse_ref(text: str) -> Optional[str]:
+    m = REF_LABELLED_12.search(text)  # "UPI reference ID: 628087232375" is the most trustworthy
+    if m:
+        return m.group(1)
     m = REF_12.search(text)
     if m:
         return m.group(1)
