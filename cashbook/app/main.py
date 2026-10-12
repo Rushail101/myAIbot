@@ -1,5 +1,6 @@
 """Runs the Telegram bot (long polling) and the dashboard API in one process."""
 import hmac
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -18,10 +19,11 @@ STATIC = Path(__file__).parent.parent / "static"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     tg = botmod.build_application()
     await tg.initialize()
     await tg.start()
-    await tg.updater.start_polling(drop_pending_updates=True)
+    await tg.updater.start_polling(drop_pending_updates=False)  # keep screenshots sent while a redeploy was happening
     try:
         yield
     finally:
@@ -79,7 +81,7 @@ async def list_entries(
     status: Optional[str] = None,
     q: Optional[str] = None,
 ):
-    return await db.list_entries(date_from, to, mode, direction, status, q)
+    return await db.list_all(date_from=date_from, date_to=to, mode=mode, direction=direction, status=status, q=q)
 
 
 @app.post("/api/entries", dependencies=[Depends(auth)])
