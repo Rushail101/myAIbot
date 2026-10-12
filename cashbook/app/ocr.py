@@ -16,6 +16,8 @@ NUM = r"\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?"
 CUR_AMOUNT = re.compile(rf"(?<![A-Za-z])(?:₹|Rs\.?|INR)\s*({NUM})(?![\d,])", re.I)
 # Tesseract often turns the ₹ glyph into X, %, T, Z, F, € ... so allow one stray leading character
 LONE_AMOUNT = re.compile(rf"^[^\d\s]?\s?({NUM})\s*$")
+# last resort: same, but tolerate 1-2 junk chars after it (the green tick beside the amount is sometimes read as "a" or "}")
+LONE_AMOUNT_LOOSE = re.compile(rf"^[^\d\s]?\s?({NUM})\s+[^\d\s]{{1,2}}\s*$")
 
 IN_WORDS = re.compile(r"received from|credited|money received|payment received|from\s+\S", re.I)
 OUT_WORDS = re.compile(r"paid to|payment to|sent to|debited|money sent|paying", re.I)
@@ -67,26 +69,39 @@ def _to_float(s: str) -> Optional[float]:
         return None
 
 
-def parse_amount(text: str) -> Optional[float]:
+def parse_amount_ex(text: str, loose: bool = True):
+    """Returns (amount, sure). sure=True when a rupee sign / symbol stood in front of the number,
+    so the first digit can't be a misread rupee glyph."""
     m = CUR_AMOUNT.search(text)
     if m and len(re.sub(r"\D", "", m.group(1))) < 9:
         v = _to_float(m.group(1))
         if v:
-            return v
-    for line in text.splitlines():
-        line = line.strip()
-        m = LONE_AMOUNT.match(line)
-        if not m:
+            return v, True
+    for rx, strict in ((LONE_AMOUNT, True), (LONE_AMOUNT_LOOSE, False)):
+        if not strict and not loose:
             continue
-        digits = re.sub(r"\D", "", m.group(1))
-        if len(digits) >= 9:  # looks like a reference id, not money
-            continue
-        if re.fullmatch(r"(19|20)\d{2}", digits):  # a bare year
-            continue
-        v = _to_float(m.group(1))
-        if v:
-            return v
-    return None
+        for line in text.splitlines():
+            line = line.strip()
+            m = rx.match(line)
+            if not m:
+                continue
+            digits = re.sub(r"\D", "", m.group(1))
+            if len(digits) >= 9:  # looks like a reference id, not money
+                continue
+            # a bare 4-digit year on its own line (never "2,000", which is a formatted amount)
+            if re.fullmatch(r"20[2-3]\d", m.group(1)):
+                continue
+            # the loose pass is only trusted for clearly money-shaped text, never "12 PM"-style fragments
+            if not strict and not ("," in m.group(1) or len(digits) >= 3):
+                continue
+            v = _to_float(m.group(1))
+            if v:
+                return v, not line[0].isdigit()
+    return None, False
+
+
+def parse_amount(text: str, loose: bool = True) -> Optional[float]:
+    return parse_amount_ex(text, loose)[0]
 
 
 def parse_direction(text: str) -> str:
@@ -163,10 +178,10 @@ def parse_ref(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def parse_text(text: str) -> dict:
+def parse_text(text: str, loose: bool = True) -> dict:
     direction = parse_direction(text)
     return {
-        "amount": parse_amount(text),
+        "amount": parse_amount(text, loose),
         "direction": direction,
         "party": parse_party(text, direction),
         "entry_date": parse_date(text),
@@ -175,16 +190,40 @@ def parse_text(text: str) -> dict:
     }
 
 
+def _pick_amount(a, b, a_sure=False, b_sure=False):
+    """Combine the amounts found by the two OCR passes. Returns (amount, sure)."""
+    if a is None or b is None:
+        v = a if a is not None else b
+        return v, (a_sure if a is not None else b_sure)
+    if a == b:
+        return a, a_sure or b_sure
+    if a_sure != b_sure:  # one pass saw a symbol in front of the number: believe that one
+        return (a, True) if a_sure else (b, True)
+    # The rupee sign is sometimes read as a digit (Rs140 -> 2140). If one pass is the other with
+    # one extra leading digit, the shorter one is the real amount.
+    for longer, shorter in ((a, b), (b, a)):
+        ls, ss = f"{longer:g}", f"{shorter:g}"
+        if len(ls) == len(ss) + 1 and ls[1:] == ss:
+            return shorter, False
+    return a, False  # otherwise trust the first pass; the bot flags it for a check
+
+
 def extract(image_bytes: bytes) -> dict:
     img = _prepare(Image.open(io.BytesIO(image_bytes)))
     text = pytesseract.image_to_string(img, config="--psm 6")
-    info = parse_text(text)
-    if info["amount"] is None:  # second pass with sparse-text mode
-        text2 = pytesseract.image_to_string(img, config="--psm 11")
-        retry = parse_text(text2)
-        for k, v in retry.items():
-            if info.get(k) is None:
-                info[k] = v
-        text += "\n" + text2
-    info["raw_text"] = text
+    text2 = pytesseract.image_to_string(img, config="--psm 11")  # sparse mode reads the big amount differently
+    info = parse_text(text, loose=False)
+    retry = parse_text(text2, loose=False)
+    for k, v in retry.items():
+        if k != "amount" and info.get(k) is None:
+            info[k] = v
+    a, a_sure = parse_amount_ex(text, loose=False)
+    b, b_sure = parse_amount_ex(text2, loose=False)
+    info["amount"], info["amount_sure"] = _pick_amount(a, b, a_sure, b_sure)
+    if info["amount"] is None:  # last resort: tolerate junk characters next to the amount
+        v, sure = parse_amount_ex(text, loose=True)
+        if v is None:
+            v, sure = parse_amount_ex(text2, loose=True)
+        info["amount"], info["amount_sure"] = v, sure
+    info["raw_text"] = text + "\n" + text2
     return info
