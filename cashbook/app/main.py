@@ -102,6 +102,15 @@ async def patch_entry(entry_id: int, body: EntryPatch):
     return await db.update(entry_id, fields)
 
 
+@app.get("/api/entries/{entry_id}/bills", dependencies=[Depends(auth)])
+async def entry_bills(entry_id: int):
+    """Short-lived links to the bill photos/PDFs stored for this entry."""
+    e = await db.get(entry_id)
+    if e is None:
+        raise HTTPException(404, "No such entry")
+    return {"urls": await db.bill_urls(e.get("bill_paths") or [])}
+
+
 @app.delete("/api/entries/{entry_id}", dependencies=[Depends(auth)])
 async def remove_entry(entry_id: int):
     await db.delete(entry_id)

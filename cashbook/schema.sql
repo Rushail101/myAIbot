@@ -23,3 +23,9 @@ create index if not exists cashbook_entries_status_idx on cashbook_entries (stat
 
 -- Only the server (service_role key) touches this table; block the public anon key.
 alter table cashbook_entries enable row level security;
+
+-- Bills: photos/PDFs live in a private storage bucket; each entry lists its files here.
+alter table cashbook_entries add column if not exists bill_paths text[] not null default '{}';
+insert into storage.buckets (id, name, public)
+values ('cashbook-bills', 'cashbook-bills', false)
+on conflict (id) do nothing;

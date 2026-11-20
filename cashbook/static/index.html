@@ -44,6 +44,7 @@
   dialog label{display:block;margin:8px 0 3px;font-size:12px;color:var(--mute)}
   dialog input,dialog select{width:100%}
   .row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  #billList a{color:var(--accent)}
   @media(max-width:640px){.stats{grid-template-columns:1fr 1fr}}
 </style>
 </head>
@@ -72,7 +73,7 @@
 
   <div class="tablewrap">
     <table>
-      <thead><tr><th>Date</th><th>Mode</th><th>Party</th><th>Purpose</th><th>Category</th><th style="text-align:right">Amount</th><th></th></tr></thead>
+      <thead><tr><th>Date</th><th>Mode</th><th>Party</th><th>Purpose</th><th>Category</th><th>Bill</th><th style="text-align:right">Amount</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty" hidden>No entries match these filters.</div>
@@ -99,6 +100,13 @@
       <button class="primary" value="save">Save</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="billDlg">
+  <h3 style="margin:0 0 6px" id="billTitle">Bill</h3>
+  <p style="margin:0 0 8px;color:var(--mute);font-size:13px">Links open the stored photo or PDF and work for one hour.</p>
+  <ul id="billList" style="margin:0 0 12px;padding-left:20px;line-height:1.9"></ul>
+  <div style="display:flex;justify-content:flex-end"><button type="button" onclick="$('#billDlg').close()">Close</button></div>
 </dialog>
 
 <script>
@@ -165,6 +173,7 @@ function viewRow(e) {
     <td>${esc(e.party)}</td>
     <td>${e.purpose ? esc(e.purpose) : '<i style="color:var(--mute)">needs a purpose</i>'}</td>
     <td>${esc(e.category)}</td>
+    <td>${billCell(e)}</td>
     <td class="num ${cls}">${e.direction === 'in' ? '+' : '−'}${inr(e.amount)}</td>
     <td class="num"><button class="link" onclick="startEdit(${e.id})">Edit</button><button class="link danger" onclick="del(${e.id})">Delete</button></td>
   </tr>`;
@@ -177,11 +186,28 @@ function editRow(e) {
     <td><input id="eParty" value="${esc(e.party)}"></td>
     <td><input id="ePurpose" value="${esc(e.purpose)}"></td>
     <td><input id="eCat" list="cats" value="${esc(e.category)}"></td>
+    <td>${billCell(e)}</td>
     <td class="num"><select id="eDir" style="width:auto"><option value="out" ${e.direction==='out'?'selected':''}>Out</option><option value="in" ${e.direction==='in'?'selected':''}>In</option></select>
       <input id="eAmt" type="number" step="0.01" value="${e.amount ?? ''}" style="width:100px"></td>
     <td class="num"><button class="link" onclick="saveEdit(${e.id})">Save</button><button class="link" onclick="editing=null;render()">Cancel</button></td>
   </tr>`;
 }
+
+function billCell(e) {
+  const n = (e.bill_paths || []).length;
+  if (!n) return e.direction === 'out' ? '<span style="color:var(--mute)">—</span>' : '';
+  return `<button class="link" onclick="showBills(${e.id})">📎 ${n > 1 ? n + ' pages' : 'View'}</button>`;
+}
+
+window.showBills = async id => {
+  const {urls} = await api(`/api/entries/${id}/bills`);
+  const e = data.find(x => x.id === id) || {};
+  $('#billTitle').textContent = `Bill · ${e.purpose || e.party || ''} · ${inr(e.amount)}`;
+  $('#billList').innerHTML = urls.length
+    ? urls.map((u, i) => `<li><a href="${esc(u)}" target="_blank" rel="noopener">Page ${i + 1}</a></li>`).join('')
+    : '<li>No bill files found.</li>';
+  $('#billDlg').showModal();
+};
 
 window.startEdit = id => { editing = id; render(); };
 window.saveEdit = async id => {
@@ -208,9 +234,9 @@ $('#bMonth').onclick = () => {
   $('#fFrom').value = `${y}-${m}-01`; $('#fTo').value = ''; load();
 };
 $('#bCsv').onclick = () => {
-  const head = ['Date','Time','Mode','Direction','Amount','Party','Purpose','Category','UPI Ref','Notes','Status'];
+  const head = ['Date','Time','Mode','Direction','Amount','Party','Purpose','Category','UPI Ref','Notes','Status','Bill pages'];
   const q = v => '"' + (v ?? '').toString().replace(/"/g, '""') + '"';
-  const lines = [head.join(',')].concat(data.map(e => [e.entry_date, e.entry_time, e.mode, e.direction, e.amount, e.party, e.purpose, e.category, e.upi_ref, e.notes, e.status].map(q).join(',')));
+  const lines = [head.join(',')].concat(data.map(e => [e.entry_date, e.entry_time, e.mode, e.direction, e.amount, e.party, e.purpose, e.category, e.upi_ref, e.notes, e.status, (e.bill_paths || []).length].map(q).join(',')));
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\n')], {type:'text/csv'}));
   a.download = 'nova-geo-cashbook.csv'; a.click();

@@ -1,5 +1,7 @@
-"""Thin async wrapper over Supabase's REST API (PostgREST). No extra SDK needed."""
+"""Thin async wrapper over Supabase's REST API (PostgREST) and Storage API. No extra SDK needed."""
+import logging
 import os
+import uuid
 from typing import Any, Optional
 
 import httpx
@@ -7,8 +9,11 @@ import httpx
 URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 TABLE = "cashbook_entries"
+BILLS_BUCKET = os.environ.get("BILLS_BUCKET", "cashbook-bills")  # private storage bucket for bill photos/PDFs
 
+log = logging.getLogger("cashbook")
 _client: Optional[httpx.AsyncClient] = None
+_storage: Optional[httpx.AsyncClient] = None
 
 
 def _c() -> httpx.AsyncClient:
@@ -20,6 +25,17 @@ def _c() -> httpx.AsyncClient:
             timeout=20,
         )
     return _client
+
+
+def _s() -> httpx.AsyncClient:
+    global _storage
+    if _storage is None:
+        _storage = httpx.AsyncClient(
+            base_url=f"{URL}/storage/v1",
+            headers={"apikey": KEY, "Authorization": f"Bearer {KEY}"},
+            timeout=60,
+        )
+    return _storage
 
 
 async def insert(row: dict) -> dict:
@@ -62,8 +78,49 @@ async def update(entry_id: int, fields: dict) -> dict:
 
 
 async def delete(entry_id: int) -> None:
+    e = await get(entry_id)
     r = await _c().delete(f"/{TABLE}", params={"id": f"eq.{entry_id}"})
     r.raise_for_status()
+    if e and e.get("bill_paths"):
+        await remove_files(e["bill_paths"])
+
+
+# ---------- bills (Supabase Storage) ----------
+async def add_bill(entry_id: int, data: bytes, ext: str, content_type: str) -> dict:
+    """Uploads one bill page and links it to the entry. Returns the updated entry."""
+    path = f"{entry_id}/{uuid.uuid4().hex}.{ext.lower().lstrip('.') or 'jpg'}"
+    r = await _s().post(f"/object/{BILLS_BUCKET}/{path}", content=data, headers={"Content-Type": content_type})
+    r.raise_for_status()
+    try:
+        e = await get(entry_id)
+        if e is None:
+            raise LookupError("entry no longer exists")
+        return await update(entry_id, {"bill_paths": list(e.get("bill_paths") or []) + [path]})
+    except Exception:
+        await remove_files([path])  # don't leave an orphan file behind
+        raise
+
+
+async def bill_urls(paths: list[str], expires_in: int = 3600) -> list[str]:
+    """Short-lived links to view private bill files."""
+    if not paths:
+        return []
+    r = await _s().post(f"/object/sign/{BILLS_BUCKET}", json={"expiresIn": expires_in, "paths": paths})
+    r.raise_for_status()
+    urls = []
+    for item in r.json():
+        signed = item.get("signedURL") or item.get("signedUrl")
+        if signed:
+            urls.append(signed if signed.startswith("http") else f"{URL}/storage/v1{signed}")
+    return urls
+
+
+async def remove_files(paths: list[str]) -> None:
+    try:
+        r = await _s().request("DELETE", f"/object/{BILLS_BUCKET}", json={"prefixes": paths})
+        r.raise_for_status()
+    except Exception as exc:  # a leftover file is harmless; don't fail the caller
+        log.warning("Couldn't remove bill files %s: %r", paths, exc)
 
 
 async def list_entries(

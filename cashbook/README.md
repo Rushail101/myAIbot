@@ -9,11 +9,12 @@ Telegram bot + web dashboard for logging UPI and cash transactions. Single user,
 - `/today` · `/summary` (month) · `/undo` (delete last entry)
 - Buttons under each screenshot: ✏️ fix amount, 🔄 flip in/out, 🗑 discard.
 - Duplicate screenshots are caught by UPI reference.
+- **Bills:** once a payment is labelled, the bot asks *Do you have a bill for this?* Tap **📎 Yes, add bill** and send the photo (or a PDF). Several pages are fine — send them one after another, then tap **Done**. To add a bill later, reply to that entry's message with the photo. Bills are stored in a private Supabase bucket (`cashbook-bills`) and open from the 📎 link in the dashboard.
 - Dashboard: filter, search, edit, add, delete, export CSV.
 
 ## Setup (≈15 min)
 
-1. **Supabase** – new project → SQL Editor → paste `schema.sql` → Run. Then Project Settings → API: copy the *Project URL* and the **service_role** key (keep it secret; only the server uses it).
+1. **Supabase** – new project → SQL Editor → paste `schema.sql` → Run. (Already set up before bills were added? Run `migrations/001_bills.sql` once instead.) Then Project Settings → API: copy the *Project URL* and the **service_role** key (keep it secret; only the server uses it).
 2. **Telegram** – talk to `@BotFather` → `/newbot` → copy the token. Start the bot and send any message; if `TELEGRAM_OWNER_ID` isn't set it replies with your numeric id. Put that in the env var (the bot ignores everyone else).
 3. **Env vars** – copy `.env.example`, fill in. `DASHBOARD_KEY` = any long random string.
 4. **Run**

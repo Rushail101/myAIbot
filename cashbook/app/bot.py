@@ -5,11 +5,15 @@ Flow
     Tap a category button, or just reply to that message with free text.
   * /cash 500 diesel       -> cash paid out.     /cashin 2000 partner top-up -> cash received.
   * /today /pending /summary /total /undo
+  * Once a payment is labelled the bot asks "Do you have a bill for this?".
+    Yes -> send the bill photo(s) or PDF; they're stored with that entry.
+    You can also attach a bill later by replying to the entry's message with a photo.
 """
 import asyncio
 import logging
 import os
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 
@@ -134,6 +138,9 @@ def describe(e: dict) -> str:
     line = " · ".join(bits)
     if e.get("purpose"):
         line += f"\n📝 {e['purpose']}"
+    n = len(e.get("bill_paths") or [])
+    if n:
+        line += f"\n📎 {n} bill page{'s' if n > 1 else ''}"
     return line
 
 
@@ -159,6 +166,80 @@ async def finish(e: dict, purpose: str, category: str | None = None) -> dict:
     return await db.update(e["id"], {"purpose": purpose, "category": category or e.get("category"), "status": "done"})
 
 
+# ---------- bills ----------
+BILL_WAIT_SECONDS = 15 * 60  # after tapping "Yes", photos count as bills for this long
+BILL_QUESTION = "\n\nDo you have a bill for this?"
+STOP_WORDS = {"no", "skip", "done", "cancel", "nahi"}
+
+
+def bill_keyboard(eid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📎 Yes, add bill", callback_data=f"bill|{eid}|y"),
+          InlineKeyboardButton("No", callback_data=f"bill|{eid}|n")]]
+    )
+
+
+def done_keyboard(eid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data=f"bill|{eid}|done")]])
+
+
+def wants_bill(e: dict) -> bool:
+    """Ask about a bill only for money paid out that doesn't have one yet."""
+    return e.get("direction") == "out" and not e.get("bill_paths")
+
+
+def bill_target_id(ctx: ContextTypes.DEFAULT_TYPE):
+    """The entry we're collecting bill photos for, if 'Yes' was tapped recently."""
+    w = ctx.user_data.get("bill_for")
+    if not w:
+        return None
+    if time.time() - w["at"] > BILL_WAIT_SECONDS:
+        ctx.user_data.pop("bill_for", None)
+        return None
+    return w["id"]
+
+
+def start_bill_wait(ctx: ContextTypes.DEFAULT_TYPE, eid: int):
+    ctx.user_data["bill_for"] = {"id": eid, "at": time.time()}
+
+
+def labelled_reply(e: dict, left: int | None = None):
+    """Text + buttons shown once an entry is labelled: the summary, then the bill question."""
+    text = "✅ " + describe(e)
+    if left is not None:
+        text += f"\n\n⏳ {left} more pending" if left else "\n\nAll caught up 🎉"
+    if wants_bill(e):
+        return text + BILL_QUESTION, bill_keyboard(e["id"])
+    return text, None
+
+
+BILL_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/heic": "heic", "application/pdf": "pdf"}
+
+
+async def save_bill(msg, e: dict, ctx: ContextTypes.DEFAULT_TYPE):
+    """Downloads the photo/PDF in msg and stores it as a bill page of entry e."""
+    if msg.photo:
+        tg_file, ctype = await msg.photo[-1].get_file(), "image/jpeg"
+    else:
+        ctype = msg.document.mime_type or "application/octet-stream"
+        tg_file = await msg.document.get_file()
+    data = bytes(await tg_file.download_as_bytearray())
+    try:
+        e = await db.add_bill(e["id"], data, BILL_EXT.get(ctype, "jpg"), ctype)
+    except Exception as exc:
+        log.exception("saving bill failed")
+        await msg.reply_text(
+            f"⚠️ Couldn't save the bill ({exc.__class__.__name__}). Send it again, or check /status."
+        )
+        return
+    start_bill_wait(ctx, e["id"])  # keep collecting pages for this entry
+    sent = await msg.reply_text(
+        "📎 Bill saved.\n" + describe(e) + "\n\nMore pages? Send them now. Otherwise tap Done.",
+        reply_markup=done_keyboard(e["id"]),
+    )
+    await db.update(e["id"], {"tg_msg_id": sent.message_id})  # replying to this later also adds pages
+
+
 # ---------- commands ----------
 @owner_only
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -173,7 +254,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• /summary — this month's totals\n"
         "• /total — all-time totals (or /total sep for one month)\n"
         "• /undo — delete the last entry\n"
-        "• /status — check that the bot, reader and database are working\n\n"
+        "• /status — check that the bot, reader and database are working\n"
+        "• Bills — after each payment I ask if you have a bill. Tap Yes and send the photo or PDF. "
+        "To add one later, reply to that entry's message with the photo.\n\n"
         "Tip: send many screenshots in a row and name them later — each one is tracked separately. "
         "Reply to a specific screenshot message to label that one."
     )
@@ -199,8 +282,11 @@ async def _log_cash(update: Update, ctx: ContextTypes.DEFAULT_TYPE, direction: s
             "status": "done" if purpose else "pending",
         }
     )
+    ctx.user_data.pop("bill_for", None)  # a new entry ends any bill collection for the previous one
     if purpose:
-        await update.message.reply_text("✅ " + describe(e))
+        text, kb = labelled_reply(e)
+        sent = await update.message.reply_text(text, reply_markup=kb)
+        await db.update(e["id"], {"tg_msg_id": sent.message_id})
     else:
         sent = await update.message.reply_text(
             f"{describe(e)}\nWhat was it for?", reply_markup=entry_keyboard(e)
@@ -320,6 +406,24 @@ async def cmd_undo(update, ctx):
 @owner_only
 async def on_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    is_pdf = bool(msg.document and msg.document.mime_type == "application/pdf")
+
+    # Is this a bill? Either a reply to an entry's message, or sent after tapping "Yes, add bill".
+    bill_entry = None
+    if msg.reply_to_message:
+        bill_entry = await db.get_by_msg(msg.reply_to_message.message_id)
+    if bill_entry is None and bill_target_id(ctx):
+        bill_entry = await db.get(bill_target_id(ctx))
+    if bill_entry is not None:
+        await save_bill(msg, bill_entry, ctx)
+        return
+    if is_pdf:
+        await msg.reply_text(
+            "PDFs are saved as bills only. Tap “📎 Yes, add bill” on an entry first, "
+            "or reply to that entry's message with the PDF."
+        )
+        return
+
     if msg.photo:
         tg_file = await msg.photo[-1].get_file()
     elif msg.document and (msg.document.mime_type or "").startswith("image/"):
@@ -403,6 +507,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
+    # "no" / "done" while the bot is waiting for bill photos
+    if bill_target_id(ctx) and text.lower().rstrip(".!") in STOP_WORDS:
+        ctx.user_data.pop("bill_for", None)
+        await msg.reply_text("OK 👍")
+        return
+
     # "cash 500 diesel" typed without the slash
     m = re.match(r"^(cash ?in|cash)\s+(.*)$", text, re.I)
     if m:
@@ -441,8 +551,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     e = await finish(target, text)
-    left = await pending_count()
-    await msg.reply_text("✅ " + describe(e) + (f"\n\n⏳ {left} more pending" if left else "\n\nAll caught up 🎉"))
+    reply, kb = labelled_reply(e, await pending_count())
+    sent = await msg.reply_text(reply, reply_markup=kb)
+    if kb:
+        await db.update(e["id"], {"tg_msg_id": sent.message_id})
 
 
 # ---------- button taps ----------
@@ -463,8 +575,20 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("Set the amount first (✏️ Amount).")
             return
         e = await finish(e, cat, cat)
-        left = await pending_count()
-        await q.edit_message_text("✅ " + describe(e) + (f"\n\n⏳ {left} more pending" if left else "\n\nAll caught up 🎉"))
+        text, kb = labelled_reply(e, await pending_count())
+        await q.edit_message_text(text, reply_markup=kb)
+    elif kind == "bill":
+        choice = rest[0] if rest else "n"
+        if choice == "y":
+            start_bill_wait(ctx, eid)
+            await q.edit_message_text(
+                "✅ " + describe(e) + "\n\n📎 Send the bill photo now (a PDF works too). "
+                "Several pages? Send them one after another."
+            )
+        else:  # "n" or "done"
+            if ctx.user_data.get("bill_for", {}).get("id") == eid:
+                ctx.user_data.pop("bill_for", None)
+            await q.edit_message_text("✅ " + describe(e))
     elif kind == "fix":
         ctx.user_data["fix"] = eid
         await db.update(eid, {"tg_msg_id": q.message.message_id})
@@ -490,6 +614,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_error_handler(on_error)
     app.add_handler(CallbackQueryHandler(on_button))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_image))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE | filters.Document.PDF, on_image))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
